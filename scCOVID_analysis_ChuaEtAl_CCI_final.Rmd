@@ -185,16 +185,9 @@ saveRDS(kruskal_pvalue, "results/chua_results/CCI_kruskal_pvalue_condition_chua.
 
 ```{r}
 
-pca_patient <- prcomp(t(-1/log(rankNet_byGroup_agg_all[names(sort(kruskal_pvalue))[1:2000],])), 
+pca_patient <- prcomp(t(-1/log(rankNet_byGroup_agg_all[names(kruskal_pvalue[kruskal_pvalue < 0.1]),])), 
                       scale. = TRUE, center = TRUE)
 
-
-
-epi_immune <- expand.grid(epi_cellType, immune_cellType)
-epi_immune <- paste(epi_immune[, 1], epi_immune[, 2], sep = "_")
-epi_immune_idx <- grep(paste(epi_immune, collapse = "|"), names(kruskal_pvalue))
-pca_patient_epi <- prcomp(t(-1/log(rankNet_byGroup_agg_all[names(sort(kruskal_pvalue[epi_immune_idx])[1:500]),])), 
-                          scale. = TRUE, center = TRUE)
 
 library(ggrepel)
 pca1 <- ggplot(data.frame(pca_patient$x), aes(x = pca_patient$x[, 1],

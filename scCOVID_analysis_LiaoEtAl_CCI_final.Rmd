@@ -175,7 +175,7 @@ saveRDS(kruskal_pvalue, "results/liao_results/CCI_kruskal_pvalue_condition_liao.
 ```{r}
 
 
-pca_patient <- prcomp(t(-1/log(rankNet_byGroup_agg_all[names(sort(kruskal_pvalue))[1:2000],])), 
+pca_patient <- prcomp(t(-1/log(rankNet_byGroup_agg_all[names(kruskal_pvalue[kruskal_pvalue < 0.2]),])), 
                       scale. = TRUE, center = TRUE)
 library(ggrepel)
 pca1 <- ggplot(data.frame(pca_patient$x), aes(x = pca_patient$x[, 1],
