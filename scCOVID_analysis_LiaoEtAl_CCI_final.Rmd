@@ -1,0 +1,391 @@
+---
+title: "Cell-cell interaction analysis: liao et al."
+author: "Yingxin Lin"
+date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    fig_height: 8
+    fig_width: 8
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+# Data and package
+
+```{r}
+library(scran)
+library(SingleCellExperiment)
+library(scater)
+library(scattermore)
+library(moon)
+library(ggplot2)
+library(ggthemes)
+library(ggpubr)
+library(reshape2)
+library(dplyr)
+library(stringr)
+library(pheatmap)
+library(CellChat)
+library(gridExtra)
+library(RColorBrewer)
+```
+
+
+```{r}
+meta_liao <- readRDS("results/liao_results/meta_liao.rds")
+coldata_liao <- readRDS("results/liao_results/coldata_liao.rds")
+```
+
+
+```{r}
+
+severity_color <- c("#2ca02c", "#FFD92F", "#7570B3")
+names(severity_color) <- c("healthy control", "mild", "severe")
+
+```
+
+
+
+
+```{r}
+# CCI results (Cellchat)
+cellchat_res_list <- readRDS("results/liao_results/liao_cellchat_res_list.rds")
+```
+
+
+# Overall pattern analysis
+
+
+```{r}
+
+rankNet_byCellType <- function(object, slot.name = "netP", 
+                               x.rotation = 90, title = NULL, color.use = NULL, 
+                               bar.w = 0.75, font.size = 8) 
+{
+    object1 <- methods::slot(object, slot.name)
+    prob1 = object1$prob
+    df <- melt(apply(prob1, 3, function(x) {
+        df <- melt(x)
+        colnames(df) <- c("Ligand", "Receptor", "value")
+        df
+    }))
+    df <- df[, c("Ligand", "Receptor", "L1", "value")]
+    colnames(df)[3] <- "Pathway"
+    return(df)
+    
+    
+}
+```
+
+
+
+```{r}
+
+rankNet_byCellType_list <- lapply(cellchat_res_list, rankNet_byCellType)
+
+rankNet_byCellType_list <- melt(rankNet_byCellType_list)
+rankNet_byCellType_list$Ligand_group <- unlist(lapply(strsplit(as.character(rankNet_byCellType_list$Ligand), 
+                                                               "_"), "[[", 1))
+rankNet_byCellType_list$Receptor_group <- unlist(lapply(strsplit(as.character(rankNet_byCellType_list$Receptor), 
+                                                                 "_"), "[[", 1))
+
+
+saveRDS(rankNet_byCellType_list, file = "results/liao_results/rankNet_byCellType_list_liao.rds")
+```
+
+
+
+
+```{r}
+
+rankNet_byGroup_agg <- aggregate(rankNet_byCellType_list$value, 
+                                 list(rankNet_byCellType_list$Ligand_group,
+                                      rankNet_byCellType_list$Receptor_group,
+                                      rankNet_byCellType_list$L1,
+                                      rankNet_byCellType_list$Pathway),
+                                 sum)
+
+
+colnames(rankNet_byGroup_agg) <- c("Ligand_group", 
+                                   "Receptor_group",
+                                   "sample",
+                                   "Pathway",
+                                   "value")
+features <- paste(rankNet_byGroup_agg$Ligand_group,
+                  rankNet_byGroup_agg$Receptor_group,
+                  rankNet_byGroup_agg$Pathway, sep = "_")
+
+rankNet_byGroup_agg$features <- features
+```
+
+
+```{r}
+
+rankNet_byGroup_agg_all <- dcast2(rankNet_byGroup_agg, 
+                                  features ~ sample, 
+                                  fun.aggregate = sum, value.var = "value")
+rankNet_byGroup_agg_all <- rankNet_byGroup_agg_all[rowSums(rankNet_byGroup_agg_all) > 0, ]
+rankNet_byGroup_agg_all <- rankNet_byGroup_agg_all[rowSums(rankNet_byGroup_agg_all!=0) > 2, ]
+
+```
+
+
+## Feature selction: kruskal test
+
+
+```{r}
+
+kruskal_pvalue <- list()
+for (i in 1:nrow(rankNet_byGroup_agg_all)) {
+    #if (i %% 100 == 0) print(i)
+    
+    kruskal_res <- try(kruskal.test(unlist(rankNet_byGroup_agg_all[i,]) ~ meta_liao[colnames(rankNet_byGroup_agg_all), ]$Condition2), silent = TRUE)
+    kruskal_pvalue[[i]] <- try(kruskal_res$p.value, silent = TRUE)
+    
+}
+
+kruskal_pvalue <- lapply(kruskal_pvalue, function(x) {
+    if (class(x) == "try-error") {
+        x <- NULL
+    }
+    x
+})
+names(kruskal_pvalue) <- rownames(rankNet_byGroup_agg_all)
+kruskal_pvalue <- unlist(kruskal_pvalue)
+
+kruskal_pvalue <- p.adjust(kruskal_pvalue, method = "BH")
+
+saveRDS(kruskal_pvalue, "results/liao_results/CCI_kruskal_pvalue_condition_liao.rds")
+```
+
+
+
+## PCA 
+
+```{r}
+
+
+pca_patient <- prcomp(t(-1/log(rankNet_byGroup_agg_all[names(sort(kruskal_pvalue))[1:2000],])), 
+                      scale. = TRUE, center = TRUE)
+library(ggrepel)
+pca1 <- ggplot(data.frame(pca_patient$x), aes(x = pca_patient$x[, 1],
+                                              y = pca_patient$x[, 2],
+                                              color = meta_liao[rownames(pca_patient$x),]$Condition2)) +
+    geom_point(size = 4, alpha = 0.8) +
+    # geom_text_repel(aes(label = rownames(pca_patient$x))) +
+    theme_yx() +
+    theme(aspect.ratio = 1) +
+    scale_color_manual(values = severity_color) +
+    xlab("PCA1") +
+    ylab("PCA2") +
+    labs(color = "")
+
+pca2 <- ggplot(data.frame(pca_patient$x), aes(x = pca_patient$x[, 1],
+                                              y = pca_patient$x[, 3],
+                                              color = meta_liao[rownames(pca_patient$x),]$Condition2)) +
+    geom_point(size = 3, alpha = 0.8) +
+    # geom_text_repel(aes(label = rownames(pca_patient$x))) +
+    theme_yx() +
+    theme(aspect.ratio = 1) +
+    scale_color_manual(values = severity_color) +
+    xlab("PCA1") +
+    ylab("PCA3") +
+    labs(color = "")
+
+pca3 <- ggplot(data.frame(pca_patient$x), aes(x = pca_patient$x[, 2],
+                                              y = pca_patient$x[, 3],
+                                              color = meta_liao[rownames(pca_patient$x),]$Condition2)) +
+    geom_point(size = 3, alpha = 0.8) +
+    # geom_text_repel(aes(label = rownames(pca_patient$x))) +
+    theme_yx() +
+    theme(aspect.ratio = 1) +
+    scale_color_manual(values = severity_color) +
+    xlab("PCA2") +
+    ylab("PCA3") +
+    labs(color = "")
+
+ggarrange(pca1, pca2, pca3, align = "hv", 
+          common.legend = TRUE, ncol = 2, nrow = 2)
+
+pca1_label <- ggplot(data.frame(pca_patient$x), aes(x = pca_patient$x[, 1],
+                                                    y = pca_patient$x[, 2],
+                                                    color = meta_liao[rownames(pca_patient$x),]$Condition2)) +
+    geom_point(size = 3, alpha = 0.8) +
+    geom_text_repel(aes(label = rownames(pca_patient$x))) +
+    theme_bw() +
+    theme(aspect.ratio = 1) +
+    scale_color_manual(values = severity_color) +
+    xlab("PCA1") +
+    ylab("PCA2") +
+    labs(color = "")
+
+```
+
+
+## Aggregation by samples
+
+```{r}
+aff_mat_bySample <- lapply(split(rankNet_byGroup_agg, rankNet_byGroup_agg$sample),
+                           function(x) dcast2(x, Ligand_group~Receptor_group,
+                                              fun.aggregate = mean, value.var = "value"))
+all_cellTypes <- names(table(coldata_liao$pred_cellTypes_scClassify))
+
+aff_mat_bySample <- lapply(aff_mat_bySample, function(x) {
+    mat <- matrix(0, ncol = length(all_cellTypes), nrow = length(all_cellTypes))
+    colnames(mat) <- rownames(mat) <- all_cellTypes
+    mat[rownames(x), colnames(x)] <- as.matrix(x)
+    mat
+})
+
+aff_mat_bySample <- lapply(aff_mat_bySample, function(x) {
+    (x - min(x))/(max(x) - min(x))
+})
+
+
+p <- lapply(1:length(aff_mat_bySample), function(i) {
+    pheatmap(aff_mat_bySample[[i]],
+             cluster_cols = FALSE, 
+             cluster_rows = FALSE,
+             main = names(aff_mat_bySample)[i],
+             color =  colorRampPalette(c("white", 
+                                         brewer.pal(n = 7, 
+                                                    name = "Reds")))(100))
+})
+
+pdf("figures/LiaoEtAl/cellchat_CCI_network_sample_byCellType.pdf", 
+    width = 15, height = 10)
+do.call(grid.arrange, list(grobs = lapply(p, function(x) x$gtable), ncol = 3))
+dev.off()
+# 
+
+
+severe_patients <- rownames(meta_liao)[meta_liao$Condition2 == "severe"]
+aff_mat_severe <- Reduce("+", aff_mat_bySample[names(aff_mat_bySample) %in% severe_patients])/length(severe_patients)
+
+moderate_patients <- rownames(meta_liao)[meta_liao$Condition2 == "mild"]
+aff_mat_moderate <- Reduce("+", aff_mat_bySample[names(aff_mat_bySample) %in% moderate_patients])/length(moderate_patients)
+
+control_patients <- rownames(meta_liao)[meta_liao$Condition2 == "healthy control"]
+aff_mat_control <- Reduce("+", aff_mat_bySample[names(aff_mat_bySample) %in% control_patients])/length(control_patients)
+
+p_severe <- pheatmap(aff_mat_severe, cluster_cols = FALSE, 
+                     cluster_rows = FALSE,
+                     main = "severe (average across samples)",
+                     color =  colorRampPalette(c("white", 
+                                                 brewer.pal(n = 7, 
+                                                            name = "Reds")))(100),
+                     breaks = seq(0, max(aff_mat_severe), max(aff_mat_severe)/100))
+library(RColorBrewer)
+p_moderate <- pheatmap(aff_mat_moderate, 
+                       cluster_cols = FALSE, 
+                       cluster_rows = FALSE,
+                       main = "moderate (average across samples)",
+                       color =  colorRampPalette(c("white", 
+                                                   brewer.pal(n = 7, 
+                                                              name = "Reds")))(100),
+                       breaks = seq(0, max(aff_mat_severe), max(aff_mat_severe)/100))
+
+
+p_control <- pheatmap(aff_mat_control, 
+                      cluster_cols = FALSE, 
+                      cluster_rows = FALSE,
+                      main = "control (average across samples)",
+                      color =  colorRampPalette(c("white", 
+                                                  brewer.pal(n = 7, 
+                                                             name = "Reds")))(100),
+                      breaks = seq(0, max(aff_mat_control), max(aff_mat_control)/100))
+
+pdf("figures/LiaoEtAl/cellchat_CCI_network_byCondition_noScale.pdf", 
+    width = 12, height = 4)
+do.call(grid.arrange, list(grobs = list(p_control$gtable,
+                                        p_moderate$gtable,
+                                        p_severe$gtable), ncol = 3))
+dev.off()
+```
+
+
+```{r}
+
+aff_mat_diff <- aff_mat_severe - aff_mat_moderate
+
+keep <- intersect(names(which(colSums(aff_mat_diff) != 0)),
+                  names(which(rowSums(aff_mat_diff) != 0)))
+
+pheatmap(aff_mat_diff[keep, keep],
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         color =  colorRampPalette(c("blue", "white", "red"))(100)[c(seq(1, 35, 5),
+                                                                     36:100)],
+         main = "server - moderate (Liao et al.)",
+         #file = "figures/LiaoEtAl/cellchat_CCI_network_byCondition_diff_noScale.pdf",
+         width = 8,
+         height = 7)
+```
+
+
+
+# Pathway-cluster cell-cell interaction
+
+## Monocyte -> Neutrophil
+
+```{r}
+keep_Monocyte <- rankNet_byCellType_list$Receptor_group %in% "Neutrophil" &
+    rankNet_byCellType_list$Ligand_group %in% c("Monocyte")
+
+pmat_Monocytes_neutrophil <- rankNet_byCellType_list[keep_Monocyte, ] %>%
+    dcast2(Pathway~L1, 
+           fun.aggregate = sum, value.var = "value")
+pmat_Monocytes_neutrophil <- pmat_Monocytes_neutrophil[rowSums(pmat_Monocytes_neutrophil) != 0 &
+                                                           rowSums(pmat_Monocytes_neutrophil != 0) > 1, ]
+
+chua_pathway_clust_monocytes <- readRDS("results/chua_results/cellchat_LigandMonocyte_ReceptorNeutrophils_pathway_cluster.rds")
+
+
+anno_row <- data.frame(pathway_cluster = factor(chua_pathway_clust_monocytes))
+
+rownames(anno_row) <- names(chua_pathway_clust_monocytes)
+anno_color <- list()
+anno_color$pathway_cluster <- RColorBrewer::brewer.pal(length(table(anno_row)), "Set2")
+names(anno_color$pathway_cluster) <- seq_len(length(table(anno_row)))
+pmat_Monocytes_neutrophil <- pmat_Monocytes_neutrophil[rownames(pmat_Monocytes_neutrophil) %in% names(chua_pathway_clust_monocytes),]
+chua_pathway_clust_monocytes <- chua_pathway_clust_monocytes[rownames(pmat_Monocytes_neutrophil)]
+pmat_Monocytes_neutrophil <- pmat_Monocytes_neutrophil[names(chua_pathway_clust_monocytes)[order(chua_pathway_clust_monocytes, rowMeans(pmat_Monocytes_neutrophil))],]
+pheatmap(-1/log(pmat_Monocytes_neutrophil),
+         #annotation_col = anno_col,
+         annotation_colors = anno_color,
+         annotation_row = anno_row,
+         clustering_method = "ward.D2",
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         color = colorRampPalette(c("white", 
+                                    brewer.pal(n = 9, name = "Reds")))(100),
+         main = "Ligand: Monocytes; Recetpor: Neutrophils (Liao et al.)",
+         #file = "figures/LiaoEtAl/cellchat_LigandMonocyte_ReceptorNeutrophils_heatmap.pdf",
+         height = 12,
+         width = 6
+)
+
+
+
+```
+
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+

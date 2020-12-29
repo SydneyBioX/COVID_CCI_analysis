@@ -1,0 +1,916 @@
+---
+title: "Cell-cell interaction analysis: Chua et al."
+author: "Yingxin Lin"
+date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    fig_height: 8
+    fig_width: 8
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+# Data and package
+
+```{r}
+library(scran)
+library(SingleCellExperiment)
+library(scater)
+library(scattermore)
+library(moon)
+library(ggplot2)
+library(ggthemes)
+library(ggpubr)
+library(reshape2)
+library(dplyr)
+library(stringr)
+library(pheatmap)
+library(CellChat)
+library(cluster)
+library(RColorBrewer)
+library(gridExtra)
+library(scales)
+```
+
+
+```{r}
+meta_chua <- readRDS("results/chua_results/meta_data_chua.rds")
+df_toPlot_colData <- readRDS("results/chua_results/df_toPlot_chua_final.rds")
+cellType_names <- names(table(df_toPlot_colData$scClassify_cluster))
+cellType_color <- tableau_color_pal("Tableau 20")(20)[c(19, 6, 3, 5, 15, 11, 9, 2, 17, 18, 7, 10, 1)]
+cellType_color <- c(cellType_color, "grey80", "grey50")
+severity_color <- c("#2ca02c", "#FFD92F", "#7570B3")
+names(severity_color) <- c("control", "moderate", "critical")
+names(cellType_color) <- c(cellType_names[!cellType_names %in% c("intermediate", "unassigned")], "intermediate", "unassigned")
+df_toPlot_colData$scClassify_cluster <- factor(df_toPlot_colData$scClassify_cluster,
+                                                    levels = names(cellType_color[c(6, 3, 11, 2, 4, 7, 12, 8, 13, 10, 5, 9, 1, 14, 15)]))
+
+stage_color <- RColorBrewer::brewer.pal(12, "Paired")[c(2, 7, 1, 10, 12, 9)]
+names(stage_color) <- levels(factor(meta_chua$stage))
+stage_color <- stage_color[c(1, 2, 3, 5, 6, 4)]
+
+anno_col <- data.frame(severity = meta_chua$severity,
+                       stage = meta_chua$stage)
+rownames(anno_col) <- meta_chua$sample
+
+
+anno_color <- list(severity = severity_color,
+                   stage = stage_color)
+```
+
+
+```{r}
+epi_cellType <- c("Basal", "Ciliated", "Goblet", "Ionocyte", "Squamous")
+immune_cellType <- c("B", "Dendritic", "Macrophage",
+                     "Monocyte", "Neutrophil", "T")
+```
+
+
+```{r}
+# CCI results (Cellchat)
+cellchat_res_list <- readRDS("results/chua_results/chua_cellchat_res_list.rds")
+```
+
+
+# Overall pattern analysis
+
+
+```{r}
+
+rankNet_byCellType <- function(object, slot.name = "netP", 
+                               x.rotation = 90, title = NULL, color.use = NULL, 
+                               bar.w = 0.75, font.size = 8) 
+{
+    object1 <- methods::slot(object, slot.name)
+    prob1 = object1$prob
+    df <- melt(apply(prob1, 3, function(x) {
+        df <- melt(x)
+        colnames(df) <- c("Ligand", "Receptor", "value")
+        df
+    }))
+    df <- df[, c("Ligand", "Receptor", "L1", "value")]
+    colnames(df)[3] <- "Pathway"
+    return(df)
+    
+    
+}
+```
+
+```{r}
+
+rankNet_byCellType_list <- lapply(cellchat_res_list, rankNet_byCellType)
+
+rankNet_byCellType_list <- melt(rankNet_byCellType_list)
+rankNet_byCellType_list$Ligand_group <- unlist(lapply(strsplit(as.character(rankNet_byCellType_list$Ligand), "_"), "[[", 1))
+rankNet_byCellType_list$Receptor_group <- unlist(lapply(strsplit(as.character(rankNet_byCellType_list$Receptor), "_"), "[[", 1))
+
+#saveRDS(rankNet_byCellType_list, file = "results/chua_results/rankNet_byCellType_list_chua.rds")
+```
+
+
+
+```{r}
+
+rankNet_byGroup_agg <- aggregate(rankNet_byCellType_list$value, 
+                                 list(rankNet_byCellType_list$Ligand_group,
+                                      rankNet_byCellType_list$Receptor_group,
+                                      rankNet_byCellType_list$L1,
+                                      rankNet_byCellType_list$Pathway),
+                                 sum)
+
+
+colnames(rankNet_byGroup_agg) <- c("Ligand_group", 
+                                   "Receptor_group",
+                                   "sample",
+                                   "Pathway",
+                                   "value")
+features <- paste(rankNet_byGroup_agg$Ligand_group,
+                  rankNet_byGroup_agg$Receptor_group,
+                  rankNet_byGroup_agg$Pathway, sep = "_")
+
+rankNet_byGroup_agg$features <- features
+
+
+rankNet_byGroup_agg_all <- dcast2(rankNet_byGroup_agg, 
+                                  features ~ sample, 
+                                  fun.aggregate = sum, value.var = "value")
+rankNet_byGroup_agg_all <- rankNet_byGroup_agg_all[rowSums(rankNet_byGroup_agg_all) > 0, ]
+rankNet_byGroup_agg_all <- rankNet_byGroup_agg_all[rowSums(rankNet_byGroup_agg_all!=0) > 2, ]
+
+```
+
+
+## Feature selction: kruskal test
+
+```{r results="hide"}
+
+kruskal_pvalue <- list()
+for (i in 1:nrow(rankNet_byGroup_agg_all)) {
+    if (i %% 100 == 0) cat(i, "...")
+    
+    kruskal_res <- try(kruskal.test(unlist(rankNet_byGroup_agg_all[i,]) ~ meta_chua[colnames(rankNet_byGroup_agg_all), ]$severity), silent = TRUE)
+    kruskal_pvalue[[i]] <- try(kruskal_res$p.value, silent = TRUE)
+    
+}
+
+kruskal_pvalue <- lapply(kruskal_pvalue, function(x) {
+    if (class(x) == "try-error") {
+        x <- NULL
+    }
+    x
+})
+names(kruskal_pvalue) <- rownames(rankNet_byGroup_agg_all)
+kruskal_pvalue <- unlist(kruskal_pvalue)
+
+kruskal_pvalue <- p.adjust(kruskal_pvalue, method = "BH")
+sort(kruskal_pvalue)[1:20]
+
+saveRDS(kruskal_pvalue, "results/chua_results/CCI_kruskal_pvalue_condition_chua.rds")
+```
+
+
+
+
+## PCA 
+
+```{r}
+
+pca_patient <- prcomp(t(-1/log(rankNet_byGroup_agg_all[names(sort(kruskal_pvalue))[1:2000],])), 
+                      scale. = TRUE, center = TRUE)
+
+
+
+epi_immune <- expand.grid(epi_cellType, immune_cellType)
+epi_immune <- paste(epi_immune[, 1], epi_immune[, 2], sep = "_")
+epi_immune_idx <- grep(paste(epi_immune, collapse = "|"), names(kruskal_pvalue))
+pca_patient_epi <- prcomp(t(-1/log(rankNet_byGroup_agg_all[names(sort(kruskal_pvalue[epi_immune_idx])[1:500]),])), 
+                          scale. = TRUE, center = TRUE)
+
+library(ggrepel)
+pca1 <- ggplot(data.frame(pca_patient$x), aes(x = pca_patient$x[, 1],
+                                      y = pca_patient$x[, 2],
+                                      color = meta_chua[rownames(pca_patient$x),]$severity)) +
+    geom_point(size = 4, alpha = 0.8) +
+    theme_yx() +
+    theme(aspect.ratio = 1) +
+    scale_color_manual(values = severity_color) +
+    xlab("PCA1") +
+    ylab("PCA2") +
+    labs(color = "")
+
+pca2 <- ggplot(data.frame(pca_patient$x), aes(x = pca_patient$x[, 1],
+                                              y = pca_patient$x[, 3],
+                                              color = meta_chua[rownames(pca_patient$x),]$severity)) +
+    geom_point(size = 3, alpha = 0.8) +
+    theme_yx() +
+    theme(aspect.ratio = 1) +
+    scale_color_manual(values = severity_color) +
+    xlab("PCA1") +
+    ylab("PCA3") +
+    labs(color = "")
+
+pca3 <- ggplot(data.frame(pca_patient$x), aes(x = pca_patient$x[, 2],
+                                              y = pca_patient$x[, 3],
+                                              color = meta_chua[rownames(pca_patient$x),]$severity)) +
+    geom_point(size = 3, alpha = 0.8) +
+    theme_yx() +
+    theme(aspect.ratio = 1) +
+    scale_color_manual(values = severity_color) +
+    xlab("PCA2") +
+    ylab("PCA3") +
+    labs(color = "")
+
+ggarrange(pca1, pca2, pca3, align = "hv", 
+          common.legend = TRUE, ncol = 3, nrow = 1)
+
+pca1
+ggsaveWithDate("figures/ChuaEtAl/PCA_patients_bySeverity", width = 6, height = 5)
+```
+
+
+```{r}
+df_pca <- data.frame(variance_explained = pca_patient$sdev^2/sum(pca_patient$sdev^2),
+                     nPCs = 1:32)
+ggplot(df_pca, aes(x = nPCs, y = variance_explained)) +
+    geom_point(alpha = 0.8, size = 2) +
+    theme_yx() +
+    theme(aspect.ratio = 1) +
+    ylab("% variance expalined")
+ggsaveWithDate("figures/ChuaEtAl/PCA_variance_expalined", width = 6, height = 5)
+
+```
+
+
+
+
+
+# Aggregation by samples
+
+
+
+```{r}
+aff_mat_bySample <- lapply(split(rankNet_byGroup_agg, rankNet_byGroup_agg$sample),
+                           function(x) dcast2(x, Ligand_group~Receptor_group,
+                                              fun.aggregate = sum, value.var = "value"))
+all_cellTypes <- names(table(rankNet_byGroup_agg$Ligand_group))
+
+aff_mat_bySample <- lapply(aff_mat_bySample, function(x) {
+    mat <- matrix(0, ncol = length(all_cellTypes), nrow = length(all_cellTypes))
+    colnames(mat) <- rownames(mat) <- all_cellTypes
+    mat[rownames(x), colnames(x)] <- as.matrix(x)
+    mat
+})
+
+aff_mat_bySample <- lapply(aff_mat_bySample, function(x) {
+    (x - min(x))/(max(x) - min(x))
+})
+
+p <- lapply(1:length(aff_mat_bySample), function(i) {
+    pheatmap(aff_mat_bySample[[i]],
+             cluster_cols = FALSE, 
+             cluster_rows = FALSE,
+             main = names(aff_mat_bySample)[i],
+             color =  colorRampPalette(c("white", 
+                                         brewer.pal(n = 7, 
+                                                    name = "Reds")))(100))
+})
+
+
+
+pdfWithDate("figures/ChuaEtAl/cellchat_CCI_network_sample_byCellType", 
+            width = 20, height = 16)
+do.call(grid.arrange, list(grobs = lapply(p, function(x) x$gtable), ncol = 6))
+dev.off()
+```
+
+# Aggregation by conditions
+
+```{r}
+severe_patients <- rownames(meta_chua)[meta_chua$severity == "critical"]
+aff_mat_severe <- Reduce("+", aff_mat_bySample[names(aff_mat_bySample) %in% severe_patients])/length(severe_patients)
+
+moderate_patients <- rownames(meta_chua)[meta_chua$severity == "moderate"]
+aff_mat_moderate <- Reduce("+", aff_mat_bySample[names(aff_mat_bySample) %in% moderate_patients])/length(moderate_patients)
+
+control_patients <- rownames(meta_chua)[meta_chua$severity == "control"]
+aff_mat_control <- Reduce("+", aff_mat_bySample[names(aff_mat_bySample) %in% control_patients])/length(control_patients)
+```
+
+
+```{r}
+p_severe <- pheatmap(aff_mat_severe, cluster_cols = FALSE, 
+                     cluster_rows = FALSE,
+                     main = "severe (average across samples)",
+                     color =  colorRampPalette(c("white", 
+                                                 brewer.pal(n = 7, 
+                                                            name = "Reds")))(100),
+                     breaks = seq(0, max(aff_mat_moderate), max(aff_mat_moderate)/100))
+library(RColorBrewer)
+p_moderate <- pheatmap(aff_mat_moderate, 
+                       cluster_cols = FALSE, 
+                       cluster_rows = FALSE,
+                       main = "moderate (average across samples)",
+                       color =  colorRampPalette(c("white", 
+                                                   brewer.pal(n = 7, 
+                                                              name = "Reds")))(100),
+                       breaks = seq(0, max(aff_mat_moderate), max(aff_mat_moderate)/100))
+
+
+p_control <- pheatmap(aff_mat_control, 
+                      cluster_cols = FALSE, 
+                      cluster_rows = FALSE,
+                      main = "control (average across samples)",
+                      color =  colorRampPalette(c("white", 
+                                                  brewer.pal(n = 7, 
+                                                             name = "Reds")))(100),
+                      breaks = seq(0, max(aff_mat_control), max(aff_mat_control)/100))
+
+pdfWithDate("figures/ChuaEtAl/cellchat_CCI_network_byCondition", 
+            width = 12, height = 4)
+do.call(grid.arrange, list(grobs = list(p_control$gtable,
+                                        p_moderate$gtable,
+                                        p_severe$gtable), ncol = 3))
+dev.off()
+```
+
+
+```{r}
+aff_mat_diff <- aff_mat_severe - aff_mat_moderate
+pheatmap(aff_mat_diff,
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         color =  colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = c(seq(min(aff_mat_diff), 0, (0 - min(aff_mat_diff))/50),
+                    seq(0.01, max(aff_mat_diff), (max(aff_mat_diff))/50)),
+         main = "server - moderate",
+         #file = "figures/ChuaEtAl/cellchat_CCI_network_byCondition_diff_new.pdf",
+         width = 8,
+         height = 7)
+
+aff_mat_diff <- aff_mat_moderate - aff_mat_control
+pheatmap(aff_mat_diff,
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         color =  colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = c(seq(min(aff_mat_diff), 0, (0 - min(aff_mat_diff))/50),
+                    seq(0.01, max(aff_mat_diff), (max(aff_mat_diff))/50)),
+         main = "moderate - control",
+         #file = "figures/ChuaEtAl/cellchat_CCI_network_byCondition_diff_moderate_control_new.pdf",
+         width = 8,
+         height = 7)
+
+aff_mat_diff <- aff_mat_severe - aff_mat_control
+pheatmap(aff_mat_diff,
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         color =  colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = c(seq(min(aff_mat_diff), 0, (0 - min(aff_mat_diff))/50),
+                    seq(0.01, max(aff_mat_diff), (max(aff_mat_diff))/50)),
+         main = "severe - control",
+         #file = "figures/ChuaEtAl/cellchat_CCI_network_byCondition_diff_severe_control_new.pdf",
+         width = 8,
+         height = 7)
+```
+
+
+
+
+
+```{r}
+mat <- aff_mat_severe - aff_mat_moderate
+
+
+cci_severe <- melt(as.matrix(mat))
+colnames(cci_severe) <- c("Ligand", "Receptor", "n")
+library(igraph)
+library(ggraph)
+g <- graph_from_data_frame(data.frame(cci_severe))
+E(g)$weights <- ifelse(cci_severe$n == 0,
+                       NA, abs(cci_severe$n))
+E(g)$sign <- ifelse(sign(cci_severe$n) == 1, "#d62728", "#1f77b4")
+
+V(g)$color <- cellType_color[V(g)$name]
+pdfWithDate("figures/ChuaEtAl/cellchat_CCI_network_byCondition_diff_network.pdf",
+            width = 8,
+            height = 6)
+plot(g, 
+     edge.arrow.size = 0.5,
+     vertex.size = 30,
+     vertex.color = V(g)$color,
+     vertex.label.color = "black",
+     vertex.label.cex = 1,
+     edge.width = E(g)$weights * 50,
+     edge.color = E(g)$sign,
+     edge.curved = 0.3,
+     layout = layout_in_circle,
+     main = "Severe vs Moderate")
+dev.off()
+```
+
+
+
+
+```{r}
+mat <- aff_mat_moderate - aff_mat_control
+
+
+
+cci_severe <- melt(as.matrix(mat))
+colnames(cci_severe) <- c("Ligand", "Receptor", "n")
+library(igraph)
+library(ggraph)
+g <- graph_from_data_frame(data.frame(cci_severe))
+E(g)$weights <- ifelse(cci_severe$n == 0,
+                       NA, abs(cci_severe$n))
+E(g)$sign <- ifelse(sign(cci_severe$n) == 1, "#d62728", "#1f77b4")
+V(g)$color <- cellType_color[V(g)$name]
+pdfWithDate("figures/ChuaEtAl/cellchat_CCI_network_byCondition_diff_network_moderate_vs_control.pdf",
+            width = 8,
+            height = 6)
+plot(g, 
+     edge.arrow.size = 0.5,
+     vertex.size = 30,
+     vertex.color = V(g)$color,
+     vertex.label.color = "black",
+     vertex.label.cex = 1,
+     edge.width = E(g)$weights * 30,
+     edge.color = E(g)$sign,
+     edge.curved = 0.3,
+     layout = layout_in_circle,
+     main = "Moderate vs Control")
+dev.off()
+```
+
+
+
+
+```{r}
+mat <- aff_mat_severe 
+
+
+cci_severe <- melt(as.matrix(mat))
+colnames(cci_severe) <- c("Ligand", "Receptor", "n")
+library(igraph)
+library(ggraph)
+cci_severe <- data.frame(cci_severe)
+cci_severe <- cci_severe[cci_severe$n != 0, ]
+
+g <- graph_from_data_frame(cci_severe, 
+                           vertices = data.frame(name = levels(cci_severe$Ligand)))
+
+E(g)$weight <- cci_severe$n
+V(g)$color <- cellType_color[V(g)$name]
+
+minMax <- function(x) {
+    (x - min(x))/(max(x) - min(x))
+}
+
+
+
+pdfWithDate("figures/ChuaEtAl/cellchat_CCI_network_byCondition_Severe_network.pdf",
+            width = 8,
+            height = 6)
+plot(g,
+     edge.arrow.size = 0.5,
+     vertex.size = 30,
+     vertex.color = V(g)$color,
+     vertex.label.color = "black",
+     vertex.label.cex = 1,
+     edge.width = E(g)$weight * 20,
+     edge.curved = rep(0.2, length(E(g))),
+     layout = layout_in_circle,
+     main = "Severe")
+dev.off()
+```
+
+
+```{r}
+mat <- aff_mat_moderate 
+
+
+cci_moderate <- melt(as.matrix(mat))
+colnames(cci_moderate) <- c("Ligand", "Receptor", "n")
+library(igraph)
+library(ggraph)
+cci_moderate <- data.frame(cci_moderate)
+cci_moderate <- cci_moderate[cci_moderate$n != 0, ]
+
+g <- graph_from_data_frame(cci_moderate, 
+                           vertices = data.frame(name = levels(cci_moderate$Ligand)))
+
+E(g)$weight <- cci_moderate$n
+V(g)$color <- cellType_color[V(g)$name]
+
+minMax <- function(x) {
+    (x - min(x))/(max(x) - min(x))
+}
+
+
+
+pdfWithDate("figures/ChuaEtAl/cellchat_CCI_network_byCondition_moderate_network.pdf",
+            width = 8,
+            height = 6)
+plot(g,
+     edge.arrow.size = 0.5,
+     vertex.size = 30,
+     vertex.color = V(g)$color,
+     vertex.label.color = "black",
+     vertex.label.cex = 1,
+     edge.width = E(g)$weight * 20,
+     edge.curved = rep(0.2, length(E(g))),
+     layout = layout_in_circle,
+     main = "Moderate")
+dev.off()
+```
+
+
+
+```{r}
+mat <- aff_mat_control 
+
+
+cci_control <- melt(as.matrix(mat))
+colnames(cci_control) <- c("Ligand", "Receptor", "n")
+library(igraph)
+library(ggraph)
+cci_control <- data.frame(cci_control)
+cci_control <- cci_control[cci_control$n != 0, ]
+
+g <- graph_from_data_frame(cci_control, 
+                           vertices = data.frame(name = levels(cci_control$Ligand)))
+
+E(g)$weight <- cci_control$n
+V(g)$color <- cellType_color[V(g)$name]
+
+minMax <- function(x) {
+    (x - min(x))/(max(x) - min(x))
+}
+
+
+
+pdfWithDate("figures/ChuaEtAl/cellchat_CCI_network_byCondition_control_network.pdf",
+            width = 8,
+            height = 6)
+plot(g,
+     edge.arrow.size = 0.5,
+     vertex.size = 30,
+     vertex.color = V(g)$color,
+     vertex.label.color = "black",
+     vertex.label.cex = 1,
+     edge.width = E(g)$weight * 20,
+     edge.curved = rep(0.2, length(E(g))),
+     layout = layout_in_circle,
+     main = "control")
+dev.off()
+```
+
+
+
+# Pathway-cluster cell-cell interaction
+
+
+```{r}
+
+anno_col <- data.frame(severity = meta_chua$severity,
+                       stage = meta_chua$stage)
+rownames(anno_col) <- meta_chua$sample
+
+
+anno_color <- list(severity = severity_color,
+                   stage = stage_color)
+names(anno_color$stage) <- levels(factor(anno_col$stage))
+names(anno_color$severity) <- levels(factor(anno_col$severity))
+```
+
+
+## Monocyte -> Neutrophil 
+
+```{r}
+keep_monocyte <- rankNet_byCellType_list$Receptor_group %in% "Neutrophil" &
+    rankNet_byCellType_list$Ligand_group %in% "Monocyte"
+
+pmat_monocytes_neutrophil <- rankNet_byCellType_list[keep_monocyte, ] %>%
+    dcast2(Pathway~L1, 
+           fun.aggregate = sum, value.var = "value")
+pmat_monocytes_neutrophil <- pmat_monocytes_neutrophil[rowSums(pmat_monocytes_neutrophil) != 0 &
+                                                           rowSums(pmat_monocytes_neutrophil != 0) > 2, ]
+
+
+hclust_pathway <- hclust(dist((-1/log(pmat_monocytes_neutrophil))),
+                         method = "ward.D2")
+nclust_pathway = 6
+pathway_clust <- cutree(hclust_pathway, k = nclust_pathway)
+saveRDS(pathway_clust, file = "results/chua_results/cellchat_LigandMonocyte_ReceptorNeutrophils_pathway_cluster.rds")
+
+anno_row <- data.frame(pathway_cluster = factor(pathway_clust))
+
+rownames(anno_row) <- names(pathway_clust)
+
+anno_color$pathway_cluster <- RColorBrewer::brewer.pal(nclust_pathway, "Set2")
+names(anno_color$pathway_cluster) <- seq_len(nclust_pathway)
+pheatmap(-1/log(pmat_monocytes_neutrophil),
+         annotation_col = anno_col[, 1, drop = FALSE],
+         annotation_colors = anno_color,
+         annotation_row = anno_row,
+         clustering_method = "ward.D2",
+         color = colorRampPalette(c("white", 
+                                    brewer.pal(n = 9, name = "Reds")))(100),
+         main = "Ligand: Monocytes; Recetpor: Neutrophils",
+         #file = "figures/ChuaEtAl/cellchat_LigandMonocyte_ReceptorNeutrophils_heatmap.pdf",
+         height = 12,
+         width = 10
+)
+dev.off()
+
+
+subset <- rankNet_byCellType_list[keep_monocyte, ] %>% 
+    filter(Pathway %in% rownames(pmat_monocytes_neutrophil))
+
+subset <- aggregate(subset$value, list(subset$Ligand, subset$L1, subset$Pathway), sum)
+colnames(subset) <- c("Ligand", "sample", "Pathway", "value")
+subset <- merge(subset, meta_chua, by = "sample")
+
+pmat_ligand_critical <- subset %>% filter(severity == "critical") %>%
+    dcast2(Ligand~Pathway, 
+           fun.aggregate = mean, value.var = "value")
+# pmat_ligand_critical <- pmat_ligand_critical[, colSums(pmat_ligand_critical) > 1e-5]
+
+pmat_ligand_moderate <- subset %>% filter(severity == "moderate") %>%
+    dcast2(Ligand~Pathway, 
+           fun.aggregate = mean, value.var = "value")
+# pmat_ligand_moderate <- pmat_ligand_moderate[, colSums(pmat_ligand_moderate) > 1e-5]
+
+for (i in c(2, 3, 4)) {
+    df_toPlot <- aggregate(subset$value, list(subset$Ligand, subset$Pathway, subset$severity), mean)
+    colnames(df_toPlot) <- c("Ligand","Pathway",  "severity", "value")
+    df_toPlot$Pathway_cluster <- factor(pathway_clust[df_toPlot$Pathway])
+    df_toPlot <- df_toPlot %>% filter(
+        Pathway %in% names(pathway_clust[pathway_clust %in% i])
+    )
+    
+    
+    df_toPlot$value[df_toPlot$value == 0] <- NA
+    df_toPlot$Ligand <- factor(as.character(df_toPlot$Ligand), levels = sort(unique(as.character(df_toPlot$Ligand))))
+    
+    ggplot(df_toPlot, aes(x = Ligand, y = Pathway, 
+                          color = value, size = value)) +
+        geom_point() +
+        scale_color_viridis_c() +
+        theme_yx() +
+        theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+        facet_grid(Pathway_cluster~severity, scales = "free_y", space = "free") +
+        ylab("") +
+        ggtitle("Ligand: Monocyte; Receptor: Neutrophil")
+    if (sum(pathway_clust %in% i) > 10) {
+        fig_height = 6
+    } else {
+        fig_height = 3
+    }
+    ggsaveWithDate(paste0("figures/ChuaEtAl/cellchat_LigandMonocyte_ReceptorNeutrophils_dot_pathClust",
+                  i), width = 6, height = fig_height)
+}
+
+```
+
+
+## Goblet -> Immune 
+
+```{r}
+keep_Goblet <- rankNet_byCellType_list$Receptor_group %in% c("Macrophage", "Monocyte", "T") &
+    rankNet_byCellType_list$Ligand_group %in% "Goblet"
+
+pmat_Goblets_Macrophage <- rankNet_byCellType_list[keep_Goblet, ] %>%
+    dcast2(Pathway~L1, 
+           fun.aggregate = sum, value.var = "value")
+
+pmat_Goblets_Macrophage <- pmat_Goblets_Macrophage[rowSums(pmat_Goblets_Macrophage) != 0 &
+                                                       rowSums(pmat_Goblets_Macrophage != 0) > 2, ]
+
+pmat_Goblets_Macrophage <- pmat_Goblets_Macrophage[, -1]
+hclust_pathway <- hclust(dist((-1/log(pmat_Goblets_Macrophage))),
+                         method = "ward.D2")
+nclust_pathway = 4
+pathway_clust <- cutree(hclust_pathway, k = nclust_pathway)
+
+
+anno_row <- data.frame(pathway_cluster = factor(pathway_clust))
+
+rownames(anno_row) <- names(pathway_clust)
+
+anno_color$pathway_cluster <- RColorBrewer::brewer.pal(nclust_pathway, "Set2")
+names(anno_color$pathway_cluster) <- seq_len(nclust_pathway)
+pheatmap(-1/log(pmat_Goblets_Macrophage),
+         annotation_col = anno_col[, 1, drop = FALSE],
+         annotation_colors = anno_color,
+         annotation_row = anno_row,
+         clustering_method = "ward.D2",
+         color = colorRampPalette(c("white", 
+                                    brewer.pal(n = 9, name = "Reds")))(100),
+         main = "Ligand: Goblets; Receptor: Macrophages, Monocyte, T",
+         #file = "figures/ChuaEtAl/cellchat_LigandGoblet_ReceptorImmune_heatmap_new.pdf",
+         height = 12,
+         width = 10
+)
+dev.off()
+
+```
+
+
+
+# Comparison across the same sample
+
+
+```{r}
+
+rankNet_ratio <- function(sample1_name, sample2_name,
+                          ligand, receptor) {
+    BIH_sample1 <- rankNet_byGroup_agg %>% 
+        filter(sample %in% sample1_name)
+    BIH_sample2 <- rankNet_byGroup_agg %>% 
+        filter(sample %in% sample2_name)
+    
+    BIH <- merge(BIH_sample1, BIH_sample2,
+                 by = colnames(BIH_sample1)[!colnames(BIH_sample1) %in% c("value", "sample")])
+    
+    BIH <- BIH[BIH$value.y != 0 | BIH$value.x != 0, ]
+    
+    
+    
+    
+    BIH_subset <- BIH %>% filter(Ligand_group %in% ligand,
+                                 Receptor_group %in% receptor)
+    
+    
+    BIH_subset$ratio <- (-1/log(BIH_subset$value.y)) / (-1/log(BIH_subset$value.x + min(BIH_subset$value.x[BIH_subset$value.x != 0]) * 0.1))
+    BIH_subset$Pathway <- factor(BIH_subset$Pathway, 
+                                 levels = unique(BIH_subset$Pathway[order(BIH_subset$ratio)]))
+    
+    return(BIH_subset)
+}
+```
+
+
+```{r}
+
+BIH_6_subset <- rankNet_ratio("BIH-CoV-06_NS_1",
+                              "BIH-CoV-06_NS_2",
+                              "Monocyte",
+                              "Neutrophil")
+
+BIH_7_subset <- rankNet_ratio("BIH-CoV-07_NS_1",
+                              "BIH-CoV-07_NS_2",
+                              "Monocyte",
+                              "Neutrophil")
+BIH_12_subset <- rankNet_ratio("BIH-CoV-12_NS_1",
+                               "BIH-CoV-12_NS_2",
+                               "Monocyte",
+                               "Neutrophil")
+
+BIH_15_subset <- rankNet_ratio("BIH-CoV-15_NS_1",
+                               "BIH-CoV-15_NS_2",
+                               "Monocyte",
+                               "Neutrophil")
+
+
+BIH_subset <- rbind(BIH_6_subset,
+                    BIH_7_subset,
+                    BIH_12_subset,
+                    BIH_15_subset)
+BIH_subset$sample <- gsub("_NS_1", "", BIH_subset$sample.x)
+tab <- table(BIH_subset[log(BIH_subset$ratio) > 0.01, ]$Pathway)
+BIH_subset <- BIH_subset %>% filter(Pathway %in% names(tab[tab > 1]))
+BIH_subset$ratio[BIH_subset$ratio == 0] <- NA
+
+ggplot(BIH_subset, 
+       aes(x = Pathway,
+           y = log(ratio),
+           fill = sample)) +
+    geom_col(position = "dodge", width = 0.7) +
+    theme_bw() +
+    theme(aspect.ratio = 0.5, 
+          axis.text.x = element_text(angle = 90, 
+                                     hjust = 1)) +
+    scale_fill_manual(values = tableau_color_pal("Tableau 20")(20)[c(11:12, 3:4)]) +
+    #coord_flip() +
+    # facet_wrap(~Pathway) +
+    ggtitle("Ligand: Monocyte; Receptor: Neutrophil") +
+    NULL
+ggsaveWithDate("figures/ChuaEtAl/CCI_TimelineComparison_logRatio_MonocyteNeutrophil.pdf",
+               width = 8, height = 5)
+
+```
+
+
+```{r}
+
+BIH_6_subset <- rankNet_ratio("BIH-CoV-06_NS_1",
+                              "BIH-CoV-06_NS_2",
+                              "Goblet",
+                              c("Monocyte", "Macrophage", "T"))
+
+BIH_6_subset_agg <- BIH_6_subset %>% group_by(Pathway) %>%
+    mutate(value.x = sum(value.x),
+           value.y = sum(value.y)) %>%
+    distinct(Pathway, .keep_all = T) %>%
+    data.frame()
+
+BIH_6_subset_agg$ratio <- (-1/log(BIH_6_subset_agg$value.y)) / (-1/log(BIH_6_subset_agg$value.x + min(BIH_6_subset_agg$value.x[BIH_6_subset_agg$value.x != 0]) * 0.1))
+BIH_6_subset_agg$Pathway <- factor(BIH_6_subset_agg$Pathway, 
+                                   levels = unique(BIH_6_subset_agg$Pathway[order(BIH_6_subset_agg$ratio)]))
+
+
+BIH_7_subset <- rankNet_ratio("BIH-CoV-07_NS_1",
+                              "BIH-CoV-07_NS_2",
+                              "Goblet",
+                              c("Monocyte", "Macrophage", "T"))
+
+BIH_7_subset_agg <- BIH_7_subset %>% group_by(Pathway) %>%
+    mutate(value.x = sum(value.x),
+           value.y = sum(value.y)) %>%
+    distinct(Pathway, .keep_all = T) %>%
+    data.frame()
+
+BIH_7_subset_agg$ratio <- (-1/log(BIH_7_subset_agg$value.y)) / (-1/log(BIH_7_subset_agg$value.x + min(BIH_7_subset_agg$value.x[BIH_7_subset_agg$value.x != 0]) * 0.1))
+BIH_7_subset_agg$Pathway <- factor(BIH_7_subset_agg$Pathway, 
+                                   levels = unique(BIH_7_subset_agg$Pathway[order(BIH_7_subset_agg$ratio)]))
+
+
+BIH_12_subset <- rankNet_ratio("BIH-CoV-12_NS_1",
+                               "BIH-CoV-12_NS_2",
+                               "Goblet",
+                               c("Monocyte", "Macrophage", "T"))
+
+
+BIH_12_subset_agg <- BIH_12_subset %>% group_by(Pathway) %>%
+    mutate(value.x = sum(value.x),
+           value.y = sum(value.y)) %>%
+    distinct(Pathway, .keep_all = T) %>%
+    data.frame()
+
+BIH_12_subset_agg$ratio <- (-1/log(BIH_12_subset_agg$value.y)) / (-1/log(BIH_12_subset_agg$value.x + min(BIH_12_subset_agg$value.x[BIH_12_subset_agg$value.x != 0]) * 0.1))
+BIH_12_subset_agg$Pathway <- factor(BIH_12_subset_agg$Pathway, 
+                                    levels = unique(BIH_12_subset_agg$Pathway[order(BIH_12_subset_agg$ratio)]))
+
+
+BIH_15_subset <- rankNet_ratio("BIH-CoV-15_NS_1",
+                               "BIH-CoV-15_NS_2",
+                               "Goblet",
+                               c("Monocyte", "Macrophage", "T"))
+
+
+BIH_15_subset_agg <- BIH_15_subset %>% group_by(Pathway) %>%
+    mutate(value.x = sum(value.x),
+           value.y = sum(value.y)) %>%
+    distinct(Pathway, .keep_all = T) %>%
+    data.frame()
+
+BIH_15_subset_agg$ratio <- (-1/log(BIH_15_subset_agg$value.y)) / (-1/log(BIH_15_subset_agg$value.x + min(BIH_15_subset_agg$value.x[BIH_15_subset_agg$value.x != 0]) * 0.1))
+BIH_15_subset_agg$Pathway <- factor(BIH_15_subset_agg$Pathway, 
+                                    levels = unique(BIH_15_subset_agg$Pathway[order(BIH_15_subset_agg$ratio)]))
+
+
+BIH_subset <- rbind(BIH_6_subset_agg,
+                    BIH_7_subset_agg,
+                    BIH_12_subset_agg,
+                    BIH_15_subset_agg)
+BIH_subset$sample <- gsub("_NS_1", "", BIH_subset$sample.x)
+tab <- table(BIH_subset[log(BIH_subset$ratio) > 0.01, ]$Pathway)
+BIH_subset <- BIH_subset %>% filter(Pathway %in% names(tab[tab > 1]))
+BIH_subset$ratio[BIH_subset$ratio == 0] <- NA
+
+ggplot(BIH_subset, 
+       aes(x = Pathway,
+           y = log(ratio),
+           fill = sample)) +
+    geom_col(position = "dodge", width = 0.7) +
+    theme_bw() +
+    theme(aspect.ratio = 0.5, 
+          axis.text.x = element_text(angle = 90, 
+                                     hjust = 1)) +
+    scale_fill_manual(values = tableau_color_pal("Tableau 20")(20)[c(11:12, 3:4)]) +
+    #coord_flip() +
+    # facet_wrap(~Pathway) +
+    ggtitle("Ligand: Goblet; Receptor: T, Macrophage, Monocyte") +
+    NULL
+ggsaveWithDate("figures/ChuaEtAl/CCI_TimelineComparison_logRatio_GobletImmune.pdf",
+               width = 8, height = 5)
+```
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
