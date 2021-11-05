@@ -1,0 +1,257 @@
+---
+title: "CCI analysis on melanoma"
+author: "Yingxin Lin"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    fig_height: 6
+    fig_width: 6
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+CCI analysis for Sade-Feldman et al. melanoma data (10.1016/j.cell.2018.10.038).
+
+# Data and Package
+
+```{r}
+library(SingleCellExperiment)
+library(CellChat)
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(ggpubr)
+library(pheatmap)
+library(reshape2)
+library(gridExtra)
+library(RColorBrewer)
+ggplot2::theme_set(theme_bw() + 
+                     theme(axis.text.y = element_text(color = "black"),
+                           axis.text.x = element_text(color = "black")))
+
+
+source("scripts/cci_functions.R")
+```
+
+
+```{r}
+colData <- readRDS("results/melanoma/meta_sadefeldman.rds")
+metadata <- unique(colData[, c("patient", "respond", "therapy")])
+metadata$prepost <- unlist(lapply(strsplit(as.character(metadata$patient), "_"), "[[", 1))
+metadata$groups <- paste(metadata$prepost, metadata$respond, sep = "_")
+rownames(metadata) <- metadata$patient
+all_cellTypes <- sort(unique(colData$scClassify))
+all_cellTypes <- all_cellTypes[!all_cellTypes %in% c("unassigned", "intermediate")]
+```
+
+
+# Cell type annotation and data integration
+
+Run `run_scClassify_scMerge2_melanoma.R` script to annotate the cell types using Li et al. and integrate the two melanoma datasets.
+
+```{r eval = FALSE}
+source("scripts/run_scClassify_scMerge2_melanoma.R")
+```
+
+# CCI analysis
+
+Run `run_cell_chat_sadeFeldman.R` script to caculate CCI scores on each patient sample using `CellChat`.
+
+```{r eval = FALSE}
+source("scripts/run_cell_chat_sadeFeldman.R")
+```
+
+Loading CCI results. `cci_res`  is a list of `CellChat` objects.
+
+```{r}
+file_list <- list.files("results/melanoma/CCI_sadefeldman/")
+
+cci_res <- lapply(file_list, function(i) {
+  readRDS(file.path("results/melanoma/CCI_sadefeldman/", i))
+})
+names(cci_res) <- gsub("cellchat_sadefeldman_|.rds", "", file_list)
+```
+
+
+
+Construct a pathway CCI matrix (a pathway + cell type pair times sample)
+
+```{r}
+pCCI_per_sample <- lapply(cci_res, pCCI_byCellType)
+pCCI_all <- pCCI_summarise(pCCI_per_sample)
+pCCI_all_mat <- dcast2(pCCI_all, 
+                          features ~ sample, 
+                          fun.aggregate = sum, value.var = "value")
+```
+
+Filtering the pathway CCI that are not expressed at all and expressed in less than 2 samples
+
+```{r}
+pCCI_all_mat <- pCCI_all_mat[rowSums(pCCI_all_mat) > 0 &
+                                     rowSums(pCCI_all_mat!=0) > 2, ]
+
+```
+
+# pCCI features selection
+
+We used Kruskal-Wallis rank sum test to select pathway-specific CCI that distinguished responder and non-responder. The features with adjusted p-value less than 0.2 are selected. In this case study, 372 pCCI are selected.
+
+```{r}
+kruskal_pvalue <- selectCCIfeatures(pCCI_all_mat, metadata[colnames(pCCI_all_mat),]$respond)
+selected_features <- names(kruskal_pvalue[kruskal_pvalue < 0.2])
+length(selected_features)
+```
+
+```{r}
+pca_patient <- prcomp(t(-1/log(pCCI_all_mat[selected_features,])), 
+                      scale. = TRUE, center = TRUE)
+
+ggplot(data.frame(metadata), aes(x = pca_patient$x[, 1],
+                                 y = pca_patient$x[, 2],
+                                 color = metadata[rownames(pca_patient$x),]$respond)) +
+  geom_point(size = 4, alpha = 0.8) +
+  theme_bw() +
+  theme(aspect.ratio = 1) +
+  xlab("PCA1") +
+  ylab("PCA2") +
+  labs(color = "") +
+  scale_color_brewer(palette = "Set1")
+```
+
+
+# Calculate total CCI for individual sample
+
+Next, we calculate the total CCI for individual sample, which sums the cell-cell interaction scores between a pair of two major cell types and across all pathways.
+
+```{r}
+tCCI_bySample <- tCCI(pCCI_per_sample)
+```
+
+The following visualizes the tCCI of the first sample:
+
+```{r}
+plotTCCI(tCCI_bySample[[1]], title = names(tCCI_bySample)[1])
+```
+
+
+# Calculate group CCI for each condition
+
+Next, we calculate group specific cell-cell interaction between two cell types where groups represent any treatment of interest. For this case studies, we have 4 groups, namely: pre-responder, pre-non responder, post-responder, post-non responder.
+
+```{r}
+groupCCI <- lapply(names(table(metadata$groups)), function(x) {
+  selected_patients <- rownames(metadata)[metadata$groups == x]
+  Reduce("+", tCCI_bySample[names(tCCI_bySample) %in% selected_patients])/length(selected_patients)
+})
+
+names(groupCCI) <- names(table(metadata$groups))
+
+par(mfrow = c(2, 2))
+for (i in 1:length(groupCCI)) {
+  pheatmap(groupCCI[[i]], cluster_cols = FALSE, 
+           cluster_rows = FALSE,
+           main = names(groupCCI)[i],
+           color =  colorRampPalette(c("white", 
+                                       brewer.pal(n = 7, 
+                                                  name = "Reds")))(100),
+           breaks = seq(0, max(groupCCI[[i]]), max(groupCCI[[i]])/100))
+}
+
+```
+
+We can therefore investigate the difference of group CCI patterns of post- and pre- between responders and non-responders. 
+
+```{r}
+
+aff_mat_diff_responder <- groupCCI$Post_Responder - groupCCI$Pre_Responder
+pheatmap(aff_mat_diff_responder,
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         color =  colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = c(seq(min(aff_mat_diff_responder), 0, (0 - min(aff_mat_diff_responder))/50),
+                    seq(0.01, max(aff_mat_diff_responder), (max(aff_mat_diff_responder))/50)),
+         main = "Responder: Post_responder - Pre_Responder",
+         width = 8,
+         height = 7)
+
+
+aff_mat_diff_nonresponder <- groupCCI$`Post_Non-responder` - groupCCI$`Pre_Non-responder`
+pheatmap(aff_mat_diff_nonresponder,
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         color =  colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = c(seq(min(aff_mat_diff_nonresponder), 0, (0 - min(aff_mat_diff_nonresponder))/50),
+                    seq(0.01, max(aff_mat_diff_nonresponder), (max(aff_mat_diff_nonresponder))/50)),
+         main = "Non-responder: Post_responder - Pre_Responder",
+         width = 8,
+         height = 7)
+```
+
+
+# Visualisation of pathway CCI
+
+Zooming in pathway CCI of Exhausted Cd8+ cells to B cell, we can further investigate what are the CCI that are distingushed between the responder and non-responder
+
+```{r}
+plot_pathwayCCI(pCCI_all, "Exhausted Cd8+ cells", "B cell", anno_col = metadata[, c(2, 4)])
+```
+
+
+# CCI for prediction
+
+Finally we will predict responder and non-responder using selected pCCI features and compared the results with cell type proportion.
+
+```{r}
+set.seed(2021)
+data <- t(-1/log(pCCI_all_mat[selected_features,]))
+true <- metadata[colnames(pCCI_all_mat),]$respond
+rf_predicted_top_features <- character(length(true))
+for (i in 1:length(true)) {
+  rf_res <- randomForest::randomForest(severity ~ ., data.frame(data[-i, ],
+                                                                severity = true[-i]))
+  rf_predicted_top_features[i] <- as.character(predict(rf_res, data.frame(data[i, , drop = FALSE])))
+  
+  
+}
+
+cat("Accuracy rate")
+mean(rf_predicted_top_features == true)
+```
+
+
+```{r}
+set.seed(2021)
+cell_type_prop <- table(colData$scClassify, colData$patient)
+cell_type_prop <- apply(cell_type_prop, 2, function(x) x/sum(x))
+data <- t(cell_type_prop)
+true <- metadata[colnames(pCCI_all_mat),]$respond
+rf_predicted_prop <- character(length(true))
+for (i in 1:length(true)) {
+  rf_res <- randomForest::randomForest(severity ~ ., data.frame(data[-i, ],
+                                                                severity = true[-i]))
+  rf_predicted_prop[i] <- as.character(predict(rf_res, data.frame(data[i, , drop = FALSE])))
+  
+  
+}
+
+mean(rf_predicted_prop == true)
+```
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
