@@ -254,7 +254,7 @@ div.tocify {
 
 <h1 class="title toc-ignore">CCI analysis on melanoma</h1>
 <h4 class="author">Yingxin Lin</h4>
-<h4 class="date">04 November, 2021</h4>
+<h4 class="date">08 November, 2021</h4>
 
 </div>
 
@@ -288,12 +288,12 @@ all_cellTypes &lt;- all_cellTypes[!all_cellTypes %in% c(&quot;unassigned&quot;, 
 </div>
 <div id="cell-type-annotation-and-data-integration" class="section level1" number="2">
 <h1 number="2"><span class="header-section-number">2</span> Cell type annotation and data integration</h1>
-<p>Run <code>run_scClassify_scMerge2_melanoma.R</code> script to annotate the cell types using Li et al. and integrate the two melanoma datasets.</p>
+<p>Run <code>run_scClassify_scMerge2_melanoma.R</code> script (<a href="https://github.com/SydneyBioX/COVID_CCI_analysis/blob/main/scripts/run_scClassify_scMerge2_melanoma.R">link</a>) to annotate the cell types using Li et al. and integrate the two melanoma datasets. The data can be downloaded from <a href="https://www.maths.usyd.edu.au/u/yingxinl/wwwnb/covidCCI/data.zip">link</a>.</p>
 <pre class="r"><code>source(&quot;scripts/run_scClassify_scMerge2_melanoma.R&quot;)</code></pre>
 </div>
 <div id="cci-analysis" class="section level1" number="3">
 <h1 number="3"><span class="header-section-number">3</span> CCI analysis</h1>
-<p>Run <code>run_cell_chat_sadeFeldman.R</code> script to caculate CCI scores on each patient sample using <code>CellChat</code>.</p>
+<p>Run <code>run_cell_chat_sadeFeldman.R</code> script (<a href="https://github.com/SydneyBioX/COVID_CCI_analysis/blob/main/scripts/run_cell_chat_sadeFeldman.R">link</a>) to calculate CCI scores on each patient sample using <code>CellChat</code>. Alternative, download the results from <a href="https://www.maths.usyd.edu.au/u/yingxinl/wwwnb/covidCCI/melanoma.zip">link</a>.</p>
 <pre class="r"><code>source(&quot;scripts/run_cell_chat_sadeFeldman.R&quot;)</code></pre>
 <p>Loading CCI results. <code>cci_res</code> is a list of <code>CellChat</code> objects.</p>
 <pre class="r"><code>file_list &lt;- list.files(&quot;results/melanoma/CCI_sadefeldman/&quot;)

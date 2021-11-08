@@ -57,7 +57,7 @@ all_cellTypes <- all_cellTypes[!all_cellTypes %in% c("unassigned", "intermediate
 
 # Cell type annotation and data integration
 
-Run `run_scClassify_scMerge2_melanoma.R` script to annotate the cell types using Li et al. and integrate the two melanoma datasets.
+Run `run_scClassify_scMerge2_melanoma.R` script ([link](https://github.com/SydneyBioX/COVID_CCI_analysis/blob/main/scripts/run_scClassify_scMerge2_melanoma.R)) to annotate the cell types using Li et al. and integrate the two melanoma datasets. The data can be downloaded from [link](https://www.maths.usyd.edu.au/u/yingxinl/wwwnb/covidCCI/data.zip).
 
 ```{r eval = FALSE}
 source("scripts/run_scClassify_scMerge2_melanoma.R")
@@ -65,7 +65,7 @@ source("scripts/run_scClassify_scMerge2_melanoma.R")
 
 # CCI analysis
 
-Run `run_cell_chat_sadeFeldman.R` script to caculate CCI scores on each patient sample using `CellChat`.
+Run `run_cell_chat_sadeFeldman.R` script ([link](https://github.com/SydneyBioX/COVID_CCI_analysis/blob/main/scripts/run_cell_chat_sadeFeldman.R)) to calculate CCI scores on each patient sample using `CellChat`. Alternative, download the results from [link](https://www.maths.usyd.edu.au/u/yingxinl/wwwnb/covidCCI/melanoma.zip).
 
 ```{r eval = FALSE}
 source("scripts/run_cell_chat_sadeFeldman.R")
